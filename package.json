@@ -1,0 +1,25 @@
+{
+  "name": "telegram-vaccibot",
+  "version": "1.0.0",
+  "description": "Telegram bot for vaccine and infection information with Anthropic citations",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "anthropic",
+    "citations",
+    "vaccine",
+    "medical"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
