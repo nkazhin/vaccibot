@@ -3,9 +3,12 @@ const { documents } = require('./documents');
 const fs = require('fs').promises;
 const path = require('path');
 
-// Initialize Anthropic client
+// Initialize Anthropic client with beta headers for Files API
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
+  defaultHeaders: {
+    'anthropic-beta': 'files-api-2025-04-14'
+  }
 });
 
 // Telegram Bot Token from environment
@@ -45,7 +48,7 @@ exports.telegramWebhook = async (req, res) => {
     const update = req.body;
     
     if (!update.message) {
-      console.log('Received update without message:', update);
+      console.log('Received update without message');
       return res.status(200).send('OK');
     }
 
@@ -54,7 +57,7 @@ exports.telegramWebhook = async (req, res) => {
     const username = update.message.from?.username || 'unknown';
     const firstName = update.message.from?.first_name || '';
     
-    console.log(`Received message from user ${userId} (@${username}, ${firstName}) in chat ${chatId}`);
+    console.log(`User ${userId} (@${username}): Received message in chat ${chatId}`);
     
     if (!update.message.text) {
       console.log(`User ${userId}: Non-text message received, ignoring`);
@@ -62,7 +65,7 @@ exports.telegramWebhook = async (req, res) => {
     }
 
     const userMessage = update.message.text;
-    console.log(`User ${userId}: Message text: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"`);
+    console.log(`User ${userId}: Message: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"`);
 
     // Check for /start command
     if (userMessage.startsWith('/start')) {
@@ -74,23 +77,21 @@ exports.telegramWebhook = async (req, res) => {
       
       // Send start message
       await sendTelegramMessage(chatId, startMessage);
-      console.log(`User ${userId}: Start message sent successfully`);
+      console.log(`User ${userId}: Start message sent`);
       return res.status(200).send('OK');
     }
 
     // Send typing action
     await sendTypingAction(chatId);
-    console.log(`User ${userId}: Typing action sent`);
 
     // Call Anthropic API with citations
-    console.log(`User ${userId}: Calling Anthropic API...`);
+    console.log(`User ${userId}: Calling Anthropic API with ${documents.length} documents...`);
     const response = await getAnthropicResponse(userMessage, userId);
-    console.log(`User ${userId}: Anthropic API response received`);
 
     // Process and format response with citations
     const formattedMessage = formatResponseWithCitations(response, userId);
     const messageLength = formattedMessage.length;
-    console.log(`User ${userId}: Formatted message length: ${messageLength} characters`);
+    console.log(`User ${userId}: Response ready (${messageLength} chars)`);
 
     // Check if message is too long for Telegram (4096 character limit)
     if (messageLength > 4096) {
@@ -107,22 +108,21 @@ exports.telegramWebhook = async (req, res) => {
     res.status(200).send('OK');
     
   } catch (error) {
-    console.error('Error processing webhook:', error);
-    console.error('Error stack:', error.stack);
+    console.error('Error processing webhook:', error.message);
+    console.error('Error details:', error.response?.data || error.stack);
     
     // Try to send error message to user
     if (req.body?.message?.chat?.id) {
       const userId = req.body.message.from?.id || 'unknown';
-      console.log(`User ${userId}: Sending error message to user`);
+      console.log(`User ${userId}: Sending error message`);
       
       try {
         await sendTelegramMessage(
           req.body.message.chat.id, 
           'Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.'
         );
-        console.log(`User ${userId}: Error message sent successfully`);
       } catch (sendError) {
-        console.error(`User ${userId}: Failed to send error message:`, sendError);
+        console.error(`User ${userId}: Failed to send error message:`, sendError.message);
       }
     }
     
@@ -135,24 +135,27 @@ exports.telegramWebhook = async (req, res) => {
  */
 async function getAnthropicResponse(userMessage, userId) {
   try {
-    // Prepare document blocks with citations enabled
-    const documentBlocks = documents.map(doc => ({
-      type: 'document',
-      source: {
-        type: 'file',
-        file_id: doc.fileId
-      },
-      title: doc.title,
-      citations: { enabled: true }
-    }));
-
-    console.log(`User ${userId}: Attached ${documentBlocks.length} documents to request`);
-
-    // Add user's question
-    documentBlocks.push({
+    // Prepare content blocks
+    const contentBlocks = [];
+    
+    // Add user's question first
+    contentBlocks.push({
       type: 'text',
       text: userMessage
     });
+    
+    // Add document blocks with correct structure
+    documents.forEach((doc, index) => {
+      contentBlocks.push({
+        type: 'document',
+        source: {
+          type: 'file',
+          file_id: doc.fileId
+        }
+      });
+    });
+
+    console.log(`User ${userId}: Sending request with ${documents.length} documents`);
 
     const startTime = Date.now();
     const response = await anthropic.messages.create({
@@ -162,24 +165,26 @@ async function getAnthropicResponse(userMessage, userId) {
       messages: [
         {
           role: 'user',
-          content: documentBlocks
+          content: contentBlocks
         }
       ]
     });
     
     const apiTime = Date.now() - startTime;
-    console.log(`User ${userId}: Anthropic API call took ${apiTime}ms`);
-    console.log(`User ${userId}: Response contains ${response.content.length} content blocks`);
+    console.log(`User ${userId}: API response received in ${apiTime}ms`);
     
     // Log token usage
     if (response.usage) {
-      console.log(`User ${userId}: Token usage - Input: ${response.usage.input_tokens}, Output: ${response.usage.output_tokens}`);
+      console.log(`User ${userId}: Tokens - Input: ${response.usage.input_tokens}, Output: ${response.usage.output_tokens}`);
     }
 
     return response;
     
   } catch (error) {
-    console.error(`User ${userId}: Anthropic API error:`, error);
+    console.error(`User ${userId}: Anthropic API error:`, error.message);
+    if (error.response?.data) {
+      console.error(`User ${userId}: API error details:`, JSON.stringify(error.response.data));
+    }
     throw error;
   }
 }
@@ -232,7 +237,7 @@ function formatResponseWithCitations(response, userId) {
     }
   }
   
-  console.log(`User ${userId}: Total citations found: ${totalCitations}`);
+  console.log(`User ${userId}: Found ${totalCitations} citations from ${citationMap.size} unique sources`);
   
   // Escape HTML entities in the main text (but preserve our tags)
   fullText = escapeHtml(fullText);
@@ -241,7 +246,6 @@ function formatResponseWithCitations(response, userId) {
   if (citationMap.size > 0) {
     fullText += '\n\n';
     fullText += formatSourcesSection(citationMap);
-    console.log(`User ${userId}: Added sources section with ${citationMap.size} unique citations`);
   }
   
   return fullText;
@@ -359,7 +363,7 @@ async function sendTelegramMessage(chatId, text) {
     return response.json();
     
   } catch (error) {
-    console.error(`Failed to send message to chat ${chatId}:`, error);
+    console.error(`Failed to send message to chat ${chatId}:`, error.message);
     throw error;
   }
 }
@@ -380,7 +384,7 @@ async function sendTypingAction(chatId) {
       })
     });
   } catch (error) {
-    console.error(`Failed to send typing action to chat ${chatId}:`, error);
+    console.error(`Failed to send typing action to chat ${chatId}:`, error.message);
     // Don't throw, this is not critical
   }
 }
