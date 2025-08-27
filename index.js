@@ -102,23 +102,15 @@ exports.telegramWebhook = async (req, res) => {
     if (mainLength > 4096) {
       console.warn(`User ${userId}: Main message too long (${mainLength} chars), truncating...`);
       const truncated = mainMessage.substring(0, 4000) + '\n\n<i>[Сообщение было сокращено из-за ограничений Telegram]</i>';
-      await sendTelegramMessage(chatId, truncated);
+      await sendTelegramMessage(chatId, truncated, userId);
     } else {
-      await sendTelegramMessage(chatId, mainMessage);
+      await sendTelegramMessage(chatId, mainMessage, userId);
     }
     
     // Send citations as a separate message if they exist
     if (citationsMessage) {
       console.log(`User ${userId}: Sending citations as separate message`);
-      
-      // Check if citations message is too long
-      if (citationsLength > 4096) {
-        console.warn(`User ${userId}: Citations message too long (${citationsLength} chars), truncating...`);
-        const truncated = citationsMessage.substring(0, 4000) + '\n\n<i>[Список цитат был сокращен из-за ограничений Telegram]</i>';
-        await sendTelegramMessage(chatId, truncated);
-      } else {
-        await sendTelegramMessage(chatId, citationsMessage);
-      }
+      await sendTelegramMessage(chatId, citationsMessage, userId);
     }
     
     console.log(`User ${userId}: All messages sent successfully`);
@@ -136,7 +128,8 @@ exports.telegramWebhook = async (req, res) => {
       try {
         await sendTelegramMessage(
           req.body.message.chat.id, 
-          'Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.'
+          'Извините, произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте еще раз.',
+          userId
         );
       } catch (sendError) {
         console.error(`User ${userId}: Failed to send error message:`, sendError.message);
@@ -311,7 +304,7 @@ function formatResponseWithCitations(response, userId) {
   // Create citations message if there are citations
   let citationsMessage = null;
   if (citations.length > 0) {
-    citationsMessage = formatCitationsMessage(citations);
+    citationsMessage = formatCitationsMessage(citations, userId);
   }
   
   return {
@@ -321,37 +314,87 @@ function formatResponseWithCitations(response, userId) {
 }
 
 /**
- * Format the citations as a separate message with full text
+ * Sanitize text for safe inclusion in HTML - removes ALL problematic characters
  */
-function formatCitationsMessage(citations) {
-  let citationsText = '<blockquote expandable>';
-  citationsText += '<b>ЦИТАТЫ И ИСТОЧНИКИ</b>\n\n';
+function sanitizeForBlockquote(text) {
+  // Remove all newlines, carriage returns, tabs - replace with spaces
+  text = text.replace(/[\r\n\t]+/g, ' ');
   
-  // Format each citation with full text - FIX: remove brackets and bold from numbering
-  for (const citation of citations) {
-    // Escape the citation text and title BEFORE adding to the message
-    const escapedText = escapeHtmlSimple(citation.text);
-    const escapedTitle = escapeHtmlSimple(citation.title);
-    
-    // Format: number. "full citation text" – Source Name
-    citationsText += `${citation.number}. "${escapedText}" – <a href="${citation.url}">${escapedTitle}</a>\n\n`;
-  }
+  // Remove any NULL bytes or other control characters
+  text = text.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '');
   
-  citationsText += '</blockquote>';
-  
-  return citationsText;
-}
-
-/**
- * Simple HTML escape for text inside citations (doesn't touch our formatting tags)
- */
-function escapeHtmlSimple(text) {
-  return text
+  // Escape HTML entities
+  text = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+  
+  // Collapse multiple spaces into one
+  text = text.replace(/\s+/g, ' ');
+  
+  // Trim whitespace
+  text = text.trim();
+  
+  // If text is too long, truncate it
+  if (text.length > 300) {
+    text = text.substring(0, 297) + '...';
+  }
+  
+  return text;
+}
+
+/**
+ * Format the citations as a separate message with full text
+ */
+function formatCitationsMessage(citations, userId) {
+  // Start building the content WITHOUT blockquote
+  let citationsContent = '';
+  
+  // Add title
+  citationsContent += '<b>ЦИТАТЫ И ИСТОЧНИКИ</b>\n\n';
+  
+  // Process each citation
+  let citationCount = 0;
+  const maxCitations = 10; // Limit to prevent message from being too long
+  
+  for (const citation of citations) {
+    if (citationCount >= maxCitations) {
+      citationsContent += `\n<i>... и еще ${citations.length - maxCitations} цитат(а)</i>\n`;
+      break;
+    }
+    
+    // Sanitize the citation text to remove ALL problematic characters
+    const sanitizedText = sanitizeForBlockquote(citation.text);
+    const sanitizedTitle = sanitizeForBlockquote(citation.title);
+    
+    // Build citation line
+    // Format: number. "citation text" – Source Name
+    const citationLine = `${citation.number}. "${sanitizedText}" – <a href="${citation.url}">${sanitizedTitle}</a>\n\n`;
+    
+    // Check if adding this citation would exceed safe length (leaving room for blockquote tags and truncation message)
+    if (citationsContent.length + citationLine.length > 3800) {
+      citationsContent += `\n<i>... и еще ${citations.length - citationCount} цитат(а)</i>\n`;
+      break;
+    }
+    
+    citationsContent += citationLine;
+    citationCount++;
+  }
+  
+  // Remove trailing newlines
+  citationsContent = citationsContent.trim();
+  
+  // NOW wrap in blockquote - at this point we know it's under 4000 chars
+  const finalMessage = `<blockquote expandable>${citationsContent}</blockquote>`;
+  
+  // Log info about the message
+  console.log(`User ${userId}: Citations message built - ${citationCount} citations included, total length: ${finalMessage.length}`);
+  console.log(`User ${userId}: First 500 chars of citations message:`, finalMessage.substring(0, 500));
+  console.log(`User ${userId}: Last 100 chars of citations message:`, finalMessage.substring(finalMessage.length - 100));
+  
+  return finalMessage;
 }
 
 /**
@@ -402,26 +445,47 @@ function escapeHtml(text) {
 }
 
 /**
- * Send message to Telegram
+ * Send message to Telegram with detailed logging
  */
-async function sendTelegramMessage(chatId, text) {
+async function sendTelegramMessage(chatId, text, userId = 'unknown') {
   try {
     const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+    
+    const requestBody = {
+      chat_id: chatId,
+      text: text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true
+    };
+    
+    // Log the full request for debugging
+    console.log(`User ${userId}: Sending to Telegram API:`, JSON.stringify({
+      ...requestBody,
+      text: requestBody.text.substring(0, 500) + (requestBody.text.length > 500 ? '...' : '')
+    }));
+    
+    // Log complete text if it contains blockquote
+    if (text.includes('blockquote')) {
+      console.log(`User ${userId}: Full blockquote message being sent (${text.length} chars):`, text);
+    }
     
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true
-      })
+      body: JSON.stringify(requestBody)
     });
     
     if (!response.ok) {
       const error = await response.text();
       console.error(`Telegram API error for chat ${chatId}:`, error);
+      
+      // Additional debug logging for blockquote errors
+      if (error.includes('blockquote')) {
+        console.error(`User ${userId}: Blockquote error detected. Message length: ${text.length}`);
+        console.error(`User ${userId}: Message starts with:`, text.substring(0, 200));
+        console.error(`User ${userId}: Message ends with:`, text.substring(text.length - 200));
+      }
+      
       throw new Error(`Telegram API error: ${error}`);
     }
     
