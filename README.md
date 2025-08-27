@@ -6,8 +6,9 @@ A Telegram bot that provides evidence-based information about vaccines and infec
 
 - **Evidence-based responses** - All answers are based on curated medical documents
 - **Inline citations** - Responses include bracketed citation numbers [1][2] linking to source documents
+- **Full citation text** - Second message shows exact text from source documents
+- **Two-message format** - Main response followed by expandable citations block
 - **Markdown support** - Converts Claude's markdown formatting (**bold**, *italics*) to Telegram HTML
-- **Expandable sources section** - References are organized in an expandable block at the end of each response
 - **Multi-document support** - Processes 13+ medical documents simultaneously
 - **HTML formatting** - Supports rich text formatting in Telegram
 - **Automatic truncation** - Handles Telegram's 4096 character limit gracefully
@@ -126,20 +127,25 @@ The bot references 13 medical documents covering topics such as:
 
 1. **Document Processing** - All documents are attached to each user message with `citations: { enabled: true }`
 2. **Model Response** - Claude generates structured citations with document indices and text locations
-3. **Citation Formatting** - Citations are converted to bracketed numbers with links [1][2][3]
-4. **Markdown Processing** - Claude's markdown formatting is converted to HTML tags
-5. **Sources Section** - All citations are collected in an expandable "ИСТОЧНИКИ" block
+3. **Two-Message Format** - Main response with inline citations [1][2][3], followed by separate citations block
+4. **Citation Formatting** - Citations are converted to bracketed numbers with links in main message
+5. **Full Text Display** - Second message shows complete cited text in expandable "ЦИТАТЫ И ИСТОЧНИКИ" block
+6. **Markdown Processing** - Claude's markdown formatting is converted to HTML tags
+7. **Citation Extraction** - Full citation text (`cited_text`) is extracted from API response
 
 ### Citation Format Example
 
-User sees:
+**First message (main response):**
 > Гепатит B передается через **кровь**[1][2][3] и другие *биологические жидкости*[4].
-> 
-> **ИСТОЧНИКИ**
-> 1-3 – [Гепатит B и прививка от него](https://bit.ly/booklet_hbv)
-> 4 – [Профилактика гепатита B](https://bit.ly/hep_b_prevention)
 
-The bracketed numbers [1], [2], etc. are clickable links that take users directly to the source documents.
+**Second message (citations block):**
+> **ЦИТАТЫ И ИСТОЧНИКИ**
+> 
+> 1. "Гепатит B - вирусная инфекция со 100% смертельным исходом" – [Гепатит B и прививка от него](https://bit.ly/booklet_hbv)
+> 
+> 2. "Передается через кровь и биологические жидкости" – [Профилактика гепатита B](https://bit.ly/hep_b_prevention)
+
+The bracketed numbers [1], [2], etc. in the main message are clickable links that take users directly to the source documents. The second message contains the full text of what was cited, displayed in italics within quotes.
 
 ## Technical Details
 
@@ -182,15 +188,17 @@ The bracketed numbers [1], [2], etc. are clickable links that take users directl
 1. **Parse content blocks** - Extract text and citations from API response
 2. **Process markdown** - Convert `**bold**` → `<b>bold</b>`, `*italic*` → `<i>italic</i>`
 3. **Map citations** - Link citation indices to document URLs
-4. **Format citations** - Add bracketed numbers [1][2] as clickable links
-5. **Group sources** - Combine consecutive citations from same document
-6. **Escape HTML** - Protect user input while preserving formatting tags
+4. **Format citations** - Add bracketed numbers [1][2] as clickable links in main message
+5. **Extract citation text** - Get `cited_text` field from each citation
+6. **Create citations message** - Format full citations with italicized quoted text
+7. **Escape HTML** - Protect user input while preserving formatting tags
+8. **Send messages** - Main response first, then citations block
 
 ### Supported HTML Tags
 
 The bot uses Telegram's HTML parse mode with these supported tags:
 - `<b>bold</b>` - Bold text (from **markdown**)
-- `<i>italic</i>` - Italic text (from *markdown*)
+- `<i>italic</i>` - Italic text (from *markdown* and for citation text)
 - `<a href="url">link</a>` - Hyperlinks (for citations)
 - `<blockquote expandable>` - Expandable quote blocks (for sources)
 - `<code>`, `<pre>` - Code formatting (preserved if present)
@@ -214,6 +222,7 @@ User 234524401: API response received in 5234ms
 User 234524401: Tokens - Input: 56507, Output: 656
 User 234524401: Found 5 citations from 2 unique sources
 User 234524401: Response sent successfully
+User 234524401: Citations message sent successfully
 ```
 
 ## Limitations
@@ -229,11 +238,13 @@ User 234524401: Response sent successfully
 - Detailed error logging for debugging
 - Always returns HTTP 200 to prevent Telegram webhook retries
 - Fallback messages if text files can't be loaded
+- Simple HTML escape function for citations to avoid parsing errors
 
 ### Telegram Formatting Errors
 
 Common issues and solutions:
 
+- **"Can't find end tag" errors** - Fixed by using separate escape functions for citations
 - **"Unsupported tag" errors** - Only use supported HTML tags (no `<sup>`, `<sub>`, etc.)
 - **Broken links** - Ensure URLs are properly escaped in href attributes
 - **Character limit exceeded** - Messages over 4096 chars are automatically truncated
@@ -248,4 +259,5 @@ Common issues and solutions:
 ## Performance Notes
 
 - **Claude 3.5 Haiku** - Chosen for fast response times and cost efficiency
-- **Average response time** - 30-40 seconds - very slow for fast model like Haiku. The citations feature likely adds latency
+- **Average response time** - 30-40 seconds (100k+ token inputs + citations feature possibly adds latency)
+- **Two-message delivery** - Main response sent first, citations follow immediately
