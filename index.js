@@ -138,28 +138,37 @@ async function getAnthropicResponse(userMessage, userId) {
     // Prepare content blocks
     const contentBlocks = [];
     
-    // Add user's question first
-    contentBlocks.push({
-      type: 'text',
-      text: userMessage
-    });
-    
-    // Add document blocks with correct structure
+    // Add document blocks WITH CITATIONS ENABLED
     documents.forEach((doc, index) => {
       contentBlocks.push({
         type: 'document',
         source: {
           type: 'file',
           file_id: doc.fileId
-        }
+        },
+        title: doc.title,  // Add document title
+        citations: { enabled: true }  // CRITICAL: Enable citations!
       });
     });
+    
+    // Add user's question
+    contentBlocks.push({
+      type: 'text',
+      text: userMessage
+    });
 
-    console.log(`User ${userId}: Sending request with ${documents.length} documents`);
+    console.log(`User ${userId}: Sending request with ${documents.length} documents (citations enabled)`);
+    
+    // Log the request structure for debugging
+    console.log(`User ${userId}: Request structure:`, JSON.stringify({
+      documentsCount: documents.length,
+      firstDoc: contentBlocks[0],
+      lastBlock: contentBlocks[contentBlocks.length - 1]
+    }, null, 2));
 
     const startTime = Date.now();
     const response = await anthropic.messages.create({
-      model: 'claude-opus-4-20250514',
+      model: 'claude-3-5-haiku-20241022',
       max_tokens: 4096,
       system: systemPrompt,
       messages: [
@@ -172,6 +181,9 @@ async function getAnthropicResponse(userMessage, userId) {
     
     const apiTime = Date.now() - startTime;
     console.log(`User ${userId}: API response received in ${apiTime}ms`);
+    
+    // Log complete raw response for debugging
+    console.log(`User ${userId}: Complete raw response:`, JSON.stringify(response, null, 2));
     
     // Log token usage
     if (response.usage) {
@@ -190,6 +202,22 @@ async function getAnthropicResponse(userMessage, userId) {
 }
 
 /**
+ * Convert markdown bold and italics to HTML tags
+ */
+function processMarkdown(text) {
+  // Process bold (**text** or __text__)
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  text = text.replace(/__([^_]+)__/g, '<b>$1</b>');
+  
+  // Process italics (*text* or _text_)
+  // Be careful not to match already processed bold markers
+  text = text.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<i>$1</i>');
+  text = text.replace(/(?<!_)_([^_]+)_(?!_)/g, '<i>$1</i>');
+  
+  return text;
+}
+
+/**
  * Format Anthropic response with citation superscripts and sources section
  */
 function formatResponseWithCitations(response, userId) {
@@ -198,21 +226,33 @@ function formatResponseWithCitations(response, userId) {
   let citationCounter = 1;
   let totalCitations = 0;
   
+  console.log(`User ${userId}: Processing ${response.content.length} content blocks`);
+  
   // Process each content block
-  for (const block of response.content) {
+  for (let i = 0; i < response.content.length; i++) {
+    const block = response.content[i];
+    console.log(`User ${userId}: Block ${i} type: ${block.type}, has citations: ${!!(block.citations && block.citations.length > 0)}`);
+    
     if (block.type === 'text') {
       let text = block.text;
       
+      // Process markdown to HTML (before adding citations)
+      text = processMarkdown(text);
+      
       // If block has citations, add superscript numbers
       if (block.citations && block.citations.length > 0) {
+        console.log(`User ${userId}: Block ${i} has ${block.citations.length} citations`);
         totalCitations += block.citations.length;
         const citationNumbers = [];
         
         for (const citation of block.citations) {
+          console.log(`User ${userId}: Processing citation:`, JSON.stringify(citation, null, 2));
+          
           const docIndex = citation.document_index;
           const doc = documents[docIndex];
           
           if (doc) {
+            console.log(`User ${userId}: Found document at index ${docIndex}: ${doc.title}`);
             citationMap.set(citationCounter, {
               title: citation.document_title || doc.title,
               url: doc.url
@@ -224,12 +264,13 @@ function formatResponseWithCitations(response, userId) {
           }
         }
         
-        // Add superscript citations to text
+        // Add bracket citations to text
         if (citationNumbers.length > 0) {
-          const superscripts = citationNumbers
-            .map(num => `<a href="${citationMap.get(num).url}"><b><sup>${num}</sup></b></a>`)
+          const citations = citationNumbers
+            .map(num => `<a href="${citationMap.get(num).url}"><b>[${num}]</b></a>`)
             .join('');
-          text = text + superscripts;
+          console.log(`User ${userId}: Adding citations: ${citations}`);
+          text = text + citations;
         }
       }
       
@@ -239,7 +280,7 @@ function formatResponseWithCitations(response, userId) {
   
   console.log(`User ${userId}: Found ${totalCitations} citations from ${citationMap.size} unique sources`);
   
-  // Escape HTML entities in the main text (but preserve our tags)
+  // Escape HTML entities in the main text (but preserve our tags and processed markdown)
   fullText = escapeHtml(fullText);
   
   // Add sources section if there are citations
@@ -297,9 +338,9 @@ function escapeHtml(text) {
   const placeholders = [];
   let placeholderIndex = 0;
   
-  // Patterns to preserve
+  // Patterns to preserve (updated for bracket format)
   const preservePatterns = [
-    /<a\s+href="[^"]+"><b><sup>\d+<\/sup><\/b><\/a>/g,
+    /<a\s+href="[^"]+"><b>\[\d+\]<\/b><\/a>/g,  // Updated pattern for bracket citations
     /<blockquote\s+expandable>[\s\S]*?<\/blockquote>/g,
     /<a\s+href="[^"]+">.*?<\/a>/g,
     /<b>.*?<\/b>/g,
