@@ -89,22 +89,39 @@ exports.telegramWebhook = async (req, res) => {
     const response = await getAnthropicResponse(userMessage, userId);
 
     // Process and format response with citations
-    const formattedMessage = formatResponseWithCitations(response, userId);
-    const messageLength = formattedMessage.length;
-    console.log(`User ${userId}: Response ready (${messageLength} chars)`);
+    const { mainMessage, citationsMessage } = formatResponseWithCitations(response, userId);
+    const mainLength = mainMessage.length;
+    const citationsLength = citationsMessage ? citationsMessage.length : 0;
+    
+    console.log(`User ${userId}: Main response ready (${mainLength} chars)`);
+    if (citationsMessage) {
+      console.log(`User ${userId}: Citations message ready (${citationsLength} chars)`);
+    }
 
-    // Check if message is too long for Telegram (4096 character limit)
-    if (messageLength > 4096) {
-      console.warn(`User ${userId}: Message too long (${messageLength} chars), truncating...`);
-      // Send truncated message with warning
-      const truncated = formattedMessage.substring(0, 4000) + '\n\n<i>[Сообщение было сокращено из-за ограничений Telegram]</i>';
+    // Send main message
+    if (mainLength > 4096) {
+      console.warn(`User ${userId}: Main message too long (${mainLength} chars), truncating...`);
+      const truncated = mainMessage.substring(0, 4000) + '\n\n<i>[Сообщение было сокращено из-за ограничений Telegram]</i>';
       await sendTelegramMessage(chatId, truncated);
     } else {
-      // Send response to user
-      await sendTelegramMessage(chatId, formattedMessage);
+      await sendTelegramMessage(chatId, mainMessage);
     }
     
-    console.log(`User ${userId}: Response sent successfully`);
+    // Send citations as a separate message if they exist
+    if (citationsMessage) {
+      console.log(`User ${userId}: Sending citations as separate message`);
+      
+      // Check if citations message is too long
+      if (citationsLength > 4096) {
+        console.warn(`User ${userId}: Citations message too long (${citationsLength} chars), truncating...`);
+        const truncated = citationsMessage.substring(0, 4000) + '\n\n<i>[Список цитат был сокращен из-за ограничений Telegram]</i>';
+        await sendTelegramMessage(chatId, truncated);
+      } else {
+        await sendTelegramMessage(chatId, citationsMessage);
+      }
+    }
+    
+    console.log(`User ${userId}: All messages sent successfully`);
     res.status(200).send('OK');
     
   } catch (error) {
@@ -218,11 +235,11 @@ function processMarkdown(text) {
 }
 
 /**
- * Format Anthropic response with citation superscripts and sources section
+ * Format Anthropic response with citation superscripts and return separate messages
  */
 function formatResponseWithCitations(response, userId) {
   let fullText = '';
-  const citationMap = new Map(); // Map citation index to document info
+  const citations = []; // Array to store citation details
   let citationCounter = 1;
   let totalCitations = 0;
   
@@ -253,10 +270,15 @@ function formatResponseWithCitations(response, userId) {
           
           if (doc) {
             console.log(`User ${userId}: Found document at index ${docIndex}: ${doc.title}`);
-            citationMap.set(citationCounter, {
+            
+            // Store citation details including the full text - FIX: use cited_text
+            citations.push({
+              number: citationCounter,
+              text: citation.cited_text || 'Текст цитаты не найден', // Changed from citation.text to citation.cited_text
               title: citation.document_title || doc.title,
               url: doc.url
             });
+            
             citationNumbers.push(citationCounter);
             citationCounter++;
           } else {
@@ -266,11 +288,14 @@ function formatResponseWithCitations(response, userId) {
         
         // Add bracket citations to text
         if (citationNumbers.length > 0) {
-          const citations = citationNumbers
-            .map(num => `<a href="${citationMap.get(num).url}"><b>[${num}]</b></a>`)
+          const citationLinks = citationNumbers
+            .map(num => {
+              const citation = citations.find(c => c.number === num);
+              return `<a href="${citation.url}"><b>[${num}]</b></a>`;
+            })
             .join('');
-          console.log(`User ${userId}: Adding citations: ${citations}`);
-          text = text + citations;
+          console.log(`User ${userId}: Adding citations: ${citationLinks}`);
+          text = text + citationLinks;
         }
       }
       
@@ -278,56 +303,55 @@ function formatResponseWithCitations(response, userId) {
     }
   }
   
-  console.log(`User ${userId}: Found ${totalCitations} citations from ${citationMap.size} unique sources`);
+  console.log(`User ${userId}: Found ${totalCitations} citations from ${citations.length} unique sources`);
   
   // Escape HTML entities in the main text (but preserve our tags and processed markdown)
   fullText = escapeHtml(fullText);
   
-  // Add sources section if there are citations
-  if (citationMap.size > 0) {
-    fullText += '\n\n';
-    fullText += formatSourcesSection(citationMap);
+  // Create citations message if there are citations
+  let citationsMessage = null;
+  if (citations.length > 0) {
+    citationsMessage = formatCitationsMessage(citations);
   }
   
-  return fullText;
+  return {
+    mainMessage: fullText,
+    citationsMessage: citationsMessage
+  };
 }
 
 /**
- * Format the expandable sources section
+ * Format the citations as a separate message with full text
  */
-function formatSourcesSection(citationMap) {
-  let sourcesText = '<blockquote expandable><b>ИСТОЧНИКИ</b>\n\n';
+function formatCitationsMessage(citations) {
+  let citationsText = '<blockquote expandable>';
+  citationsText += '<b>ЦИТАТЫ И ИСТОЧНИКИ</b>\n\n';
   
-  // Group consecutive citations with same URL
-  const groups = [];
-  let currentGroup = null;
-  
-  for (const [index, info] of citationMap.entries()) {
-    if (currentGroup && currentGroup.url === info.url) {
-      currentGroup.end = index;
-    } else {
-      currentGroup = {
-        start: index,
-        end: index,
-        title: info.title,
-        url: info.url
-      };
-      groups.push(currentGroup);
-    }
-  }
-  
-  // Format each group
-  for (const group of groups) {
-    const range = group.start === group.end 
-      ? `${group.start}` 
-      : `${group.start}-${group.end}`;
+  // Format each citation with full text - FIX: remove brackets and bold from numbering
+  for (const citation of citations) {
+    // Escape the citation text and title BEFORE adding to the message
+    const escapedText = escapeHtmlSimple(citation.text);
+    const escapedTitle = escapeHtmlSimple(citation.title);
     
-    sourcesText += `${range} – <a href="${group.url}">${escapeHtml(group.title)}</a>\n`;
+    // Format: number. "full citation text" – Source Name
+    citationsText += `${citation.number}. "${escapedText}" – <a href="${citation.url}">${escapedTitle}</a>\n\n`;
   }
   
-  sourcesText += '</blockquote>';
+  citationsText += '</blockquote>';
   
-  return sourcesText;
+  return citationsText;
+}
+
+/**
+ * Simple HTML escape for text inside citations (doesn't touch our formatting tags)
+ */
+function escapeHtmlSimple(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /**
